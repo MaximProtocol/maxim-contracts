@@ -1,0 +1,20 @@
+[package]
+name = "maxim-protocol"
+version = "0.1.0"
+description = "Maxim Protocol on-chain program — agent wallet registry, payment ledger, and spend policy enforcement on Solana"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "maxim_protocol"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = { version = "0.31.0", features = ["init-if-needed"] }
+anchor-spl = { version = "0.31.0", features = ["token", "associated_token"] }

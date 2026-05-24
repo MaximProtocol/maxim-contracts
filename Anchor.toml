@@ -1,0 +1,25 @@
+[features]
+seeds = true
+skip-lint = false
+
+[programs.localnet]
+maxim_protocol = "337JEF6PSMGSPwBSseMHFa95YxLACnJeehA5brVAgzKh"
+
+[programs.devnet]
+maxim_protocol = "337JEF6PSMGSPwBSseMHFa95YxLACnJeehA5brVAgzKh"
+
+[programs.testnet]
+maxim_protocol = "337JEF6PSMGSPwBSseMHFa95YxLACnJeehA5brVAgzKh"
+
+[programs.mainnet]
+maxim_protocol = "337JEF6PSMGSPwBSseMHFa95YxLACnJeehA5brVAgzKh"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Devnet"
+wallet = ".keys/deployer.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
