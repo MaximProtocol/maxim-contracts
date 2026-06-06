@@ -96,6 +96,15 @@ impl AgentWallet {
         + 1                                     // is_frozen
         + 1;                                    // bump
 
+    /// Returns `true` if the wallet can process payments — i.e. it is both
+    /// active (owner-controlled) and not frozen (protocol-admin-controlled).
+    /// Use this wherever a single operational check suffices; use the individual
+    /// `is_active` / `is_frozen` fields when the error message must distinguish
+    /// between the two suspension causes.
+    pub fn is_operational(&self) -> bool {
+        self.is_active && !self.is_frozen
+    }
+
     /// Resets the daily spend accumulator if the 24-hour window has elapsed.
     /// Called at the start of every `settle_payment` to ensure budget checks
     /// operate on the current window.
