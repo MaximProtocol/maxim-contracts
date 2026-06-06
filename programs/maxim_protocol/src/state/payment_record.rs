@@ -98,4 +98,16 @@ impl PaymentRecord {
         + 1                         // policy_passed
         + 1 + 32                    // parent_payment: Option<Pubkey> (1-byte discriminant + Pubkey)
         + 1;                        // bump
+
+    /// Returns `true` when this record documents a policy violation rather than
+    /// a successful settlement. Equivalent to `!self.policy_passed`.
+    pub fn is_violation(&self) -> bool {
+        !self.policy_passed
+    }
+
+    /// Returns `true` when this payment is part of a multi-agent orchestration
+    /// chain, i.e. it was funded by a parent agent's budget.
+    pub fn is_chained(&self) -> bool {
+        self.parent_payment.is_some()
+    }
 }
