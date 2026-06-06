@@ -89,6 +89,30 @@ impl SpendPolicy {
         + 4 + (MAX_DOMAIN_ENTRIES * 32)                    // blocked_domain_hashes
         + 1;                                                // bump
 
+    /// Returns `true` if `amount` does not exceed the per-call limit.
+    /// Always returns `true` when `per_call_limit` is zero (limit disabled).
+    pub fn within_per_call_limit(&self, amount: u64) -> bool {
+        self.per_call_limit == 0 || amount <= self.per_call_limit
+    }
+
+    /// Returns `true` if adding `amount` to `current_spend` stays within the
+    /// daily budget. Always returns `true` when `daily_budget` is zero (disabled).
+    pub fn within_daily_budget(&self, current_spend: u64, amount: u64) -> bool {
+        self.daily_budget == 0 || current_spend.saturating_add(amount) <= self.daily_budget
+    }
+
+    /// Returns `true` if adding `amount` to `current_spend` stays within the
+    /// weekly budget. Always returns `true` when `weekly_budget` is zero (disabled).
+    pub fn within_weekly_budget(&self, current_spend: u64, amount: u64) -> bool {
+        self.weekly_budget == 0 || current_spend.saturating_add(amount) <= self.weekly_budget
+    }
+
+    /// Returns `true` if the agent has not yet hit the per-window call cap.
+    /// Always returns `true` when `rate_limit_calls` is zero (disabled).
+    pub fn within_rate_limit(&self) -> bool {
+        self.rate_limit_calls == 0 || self.rate_limit_call_count < self.rate_limit_calls
+    }
+
     /// Resets the rate-limit call counter if the current window has elapsed.
     pub fn reset_rate_window_if_elapsed(&mut self, now: i64) {
         if self.rate_limit_window_secs > 0
