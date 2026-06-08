@@ -82,6 +82,19 @@ pub struct OwnershipTransferred {
     pub transferred_at: i64,
 }
 
+/// Emitted whenever a spend policy is created or updated.
+/// Captures the new budget and threshold values so the dashboard can display
+/// a full audit trail of policy changes without storing pre-update state.
+#[event]
+pub struct SpendPolicyUpdated {
+    pub agent_wallet: Pubkey,
+    pub daily_budget: u64,
+    pub weekly_budget: u64,
+    pub per_call_limit: u64,
+    pub high_value_threshold: u64,
+    pub updated_at: i64,
+}
+
 // ─── Instruction Parameters ───────────────────────────────────────────────────
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone)]
@@ -183,6 +196,10 @@ pub mod maxim_protocol {
             !agent_id.is_empty() && agent_id.len() <= MAX_AGENT_ID_LEN,
             MaximError::AgentIdTooLong
         );
+        require!(
+            agent_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+            MaximError::InvalidAgentId
+        );
 
         let now = Clock::get()?.unix_timestamp;
         let wallet = &mut ctx.accounts.agent_wallet;
@@ -244,6 +261,15 @@ pub mod maxim_protocol {
         policy.allowed_domain_hashes = params.allowed_domain_hashes;
         policy.blocked_domain_hashes = params.blocked_domain_hashes;
         policy.bump = ctx.bumps.spend_policy;
+
+        emit!(SpendPolicyUpdated {
+            agent_wallet: ctx.accounts.agent_wallet.key(),
+            daily_budget: params.daily_budget,
+            weekly_budget: params.weekly_budget,
+            per_call_limit: params.per_call_limit,
+            high_value_threshold: params.high_value_threshold,
+            updated_at: now,
+        });
 
         Ok(())
     }
@@ -644,6 +670,7 @@ pub mod maxim_protocol {
         new_owner: Pubkey,
     ) -> Result<()> {
         require!(new_owner != Pubkey::default(), MaximError::InvalidOwner);
+        require!(new_owner != ctx.accounts.agent_wallet.owner, MaximError::OwnerUnchanged);
 
         let now = Clock::get()?.unix_timestamp;
         let wallet_key = ctx.accounts.agent_wallet.key();
@@ -656,6 +683,62 @@ pub mod maxim_protocol {
             old_owner,
             new_owner,
             transferred_at: now,
+        });
+
+        Ok(())
+    }
+
+    /// Permanently close an agent wallet and its spend policy, reclaiming rent.
+    ///
+    /// Requirements:
+    /// - The wallet must already be deactivated (via `deactivate_agent`).
+    /// - The agent's USDC token account must be fully drained (via `withdraw_funds`
+    ///   or `withdraw_all`) before calling this instruction.
+    ///
+    /// On success, Anchor's `close` constraint transfers the lamports from both
+    /// the `agent_wallet` and `spend_policy` accounts to the owner, zeroing the
+    /// accounts and permanently removing them from the ledger.
+    pub fn close_agent(_ctx: Context<CloseAgent>) -> Result<()> {
+        Ok(())
+    }
+
+    /// Withdraw the entire USDC balance from an agent's ATA in a single call.
+    ///
+    /// Convenience wrapper around `withdraw_funds` that derives the amount
+    /// automatically from the current ATA balance, avoiding a prefetch round-trip.
+    /// Succeeds regardless of `is_active` or `is_frozen` state.
+    pub fn withdraw_all(ctx: Context<WithdrawFunds>) -> Result<()> {
+        let amount = ctx.accounts.usdc_token_account.amount;
+        require!(amount > 0, MaximError::ZeroPaymentAmount);
+
+        let now = Clock::get()?.unix_timestamp;
+        let agent_id_bytes = ctx.accounts.agent_wallet.agent_id.as_bytes().to_vec();
+        let bump = ctx.accounts.agent_wallet.bump;
+
+        let signer_seeds: &[&[&[u8]]] = &[&[
+            b"agent_wallet",
+            agent_id_bytes.as_slice(),
+            &[bump],
+        ]];
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.usdc_token_account.to_account_info(),
+                    to: ctx.accounts.owner_token_account.to_account_info(),
+                    authority: ctx.accounts.agent_wallet.to_account_info(),
+                },
+                signer_seeds,
+            ),
+            amount,
+        )?;
+
+        emit!(FundsWithdrawn {
+            agent_wallet: ctx.accounts.agent_wallet.key(),
+            to: ctx.accounts.owner_token_account.owner,
+            amount_usdc: amount,
+            withdrawn_at: now,
         });
 
         Ok(())
@@ -926,4 +1009,44 @@ pub struct TransferOwnership<'info> {
     pub agent_wallet: Account<'info, AgentWallet>,
 
     pub owner: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct CloseAgent<'info> {
+    /// The wallet to close. Must be deactivated and have an empty ATA.
+    /// Anchor's `close = owner` transfers its rent lamports to the owner.
+    #[account(
+        mut,
+        close = owner,
+        has_one = owner @ MaximError::Unauthorized,
+        constraint = !agent_wallet.is_active @ MaximError::AgentStillActive,
+    )]
+    pub agent_wallet: Account<'info, AgentWallet>,
+
+    /// The spend policy PDA associated with this wallet. Closed alongside the wallet
+    /// so rent is fully reclaimed in one transaction.
+    #[account(
+        mut,
+        close = owner,
+        seeds = [b"spend_policy", agent_wallet.key().as_ref()],
+        bump = spend_policy.bump,
+    )]
+    pub spend_policy: Account<'info, SpendPolicy>,
+
+    /// The agent's USDC ATA. Must be fully drained before the wallet can be closed.
+    #[account(
+        associated_token::mint = usdc_mint,
+        associated_token::authority = agent_wallet,
+        constraint = usdc_token_account.amount == 0 @ MaximError::TokenAccountNotEmpty,
+    )]
+    pub usdc_token_account: Account<'info, TokenAccount>,
+
+    pub usdc_mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
 }
