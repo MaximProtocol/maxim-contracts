@@ -5,6 +5,9 @@ pub enum MaximError {
     #[msg("Agent ID must be between 1 and 64 characters")]
     AgentIdTooLong,
 
+    #[msg("Agent ID may only contain ASCII letters, digits, hyphens, and underscores")]
+    InvalidAgentId,
+
     #[msg("Agent wallet is not active")]
     AgentNotActive,
 
@@ -47,9 +50,18 @@ pub enum MaximError {
     #[msg("New owner pubkey must not be the default (zero) address")]
     InvalidOwner,
 
+    #[msg("New owner is identical to the current owner; transfer has no effect")]
+    OwnerUnchanged,
+
     #[msg("Withdrawal amount exceeds available token account balance")]
     InsufficientFunds,
 
     #[msg("ProtocolConfig has already been initialised")]
     ProtocolAlreadyInitialised,
+
+    #[msg("Agent wallet must be deactivated before it can be closed")]
+    AgentStillActive,
+
+    #[msg("USDC token account must be fully drained before closing the agent wallet")]
+    TokenAccountNotEmpty,
 }
