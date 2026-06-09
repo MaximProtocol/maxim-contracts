@@ -1,5 +1,10 @@
 use anchor_lang::prelude::*;
 
+/// Incremented whenever a breaking change is made to on-chain account layouts or
+/// instruction encoding. Off-chain clients should assert this matches their
+/// compiled-in expectation before submitting transactions.
+pub const PROGRAM_VERSION: u8 = 1;
+
 /// Singleton protocol-authority account. Initialised once by the program deployer.
 ///
 /// Stores the `admin` pubkey authorised to freeze or unfreeze any AgentWallet
