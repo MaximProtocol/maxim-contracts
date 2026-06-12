@@ -111,7 +111,8 @@ impl AgentWallet {
     pub fn reset_daily_window_if_elapsed(&mut self, now: i64) {
         if now >= self.daily_window_start + SECONDS_PER_DAY {
             self.daily_spend = 0;
-            self.daily_window_start = now;
+            let periods = (now - self.daily_window_start) / SECONDS_PER_DAY;
+            self.daily_window_start += periods * SECONDS_PER_DAY;
         }
     }
 
@@ -120,7 +121,8 @@ impl AgentWallet {
     pub fn reset_weekly_window_if_elapsed(&mut self, now: i64) {
         if now >= self.weekly_window_start + SECONDS_PER_WEEK {
             self.weekly_spend = 0;
-            self.weekly_window_start = now;
+            let periods = (now - self.weekly_window_start) / SECONDS_PER_WEEK;
+            self.weekly_window_start += periods * SECONDS_PER_WEEK;
         }
     }
 }
