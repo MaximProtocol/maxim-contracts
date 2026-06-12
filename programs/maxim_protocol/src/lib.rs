@@ -162,6 +162,7 @@ pub mod maxim_protocol {
         require!(admin != Pubkey::default(), MaximError::InvalidOwner);
         let config = &mut ctx.accounts.protocol_config;
         config.admin = admin;
+        config.version = PROGRAM_VERSION;
         config.bump = ctx.bumps.protocol_config;
         Ok(())
     }
@@ -301,6 +302,10 @@ pub mod maxim_protocol {
             PaymentProtocol::from_discriminant(params.protocol).is_some(),
             MaximError::InvalidProtocol
         );
+        require!(
+            sequence == ctx.accounts.agent_wallet.payment_sequence,
+            MaximError::SequenceMismatch
+        );
 
         let now = Clock::get()?.unix_timestamp;
 
@@ -326,40 +331,23 @@ pub mod maxim_protocol {
                 && params.amount_usdc >= policy.high_value_threshold;
 
             if enforce_on_chain {
-                if policy.per_call_limit > 0 {
-                    require!(
-                        params.amount_usdc <= policy.per_call_limit,
-                        MaximError::PerCallLimitExceeded
-                    );
-                }
-
-                if policy.daily_budget > 0 {
-                    require!(
-                        wallet
-                            .daily_spend
-                            .saturating_add(params.amount_usdc)
-                            <= policy.daily_budget,
-                        MaximError::DailyBudgetExceeded
-                    );
-                }
-
-                if policy.weekly_budget > 0 {
-                    require!(
-                        wallet
-                            .weekly_spend
-                            .saturating_add(params.amount_usdc)
-                            <= policy.weekly_budget,
-                        MaximError::WeeklyBudgetExceeded
-                    );
-                }
-
+                require!(
+                    policy.within_per_call_limit(params.amount_usdc),
+                    MaximError::PerCallLimitExceeded
+                );
+                require!(
+                    policy.within_daily_budget(wallet.daily_spend, params.amount_usdc),
+                    MaximError::DailyBudgetExceeded
+                );
+                require!(
+                    policy.within_weekly_budget(wallet.weekly_spend, params.amount_usdc),
+                    MaximError::WeeklyBudgetExceeded
+                );
                 policy.reset_rate_window_if_elapsed(now);
-                if policy.rate_limit_calls > 0 {
-                    require!(
-                        policy.rate_limit_call_count < policy.rate_limit_calls,
-                        MaximError::RateLimitExceeded
-                    );
-                }
+                require!(
+                    policy.within_rate_limit(),
+                    MaximError::RateLimitExceeded
+                );
 
                 // Blocklist is evaluated before allowlist.
                 if !policy.blocked_domain_hashes.is_empty() {
@@ -471,6 +459,10 @@ pub mod maxim_protocol {
         require!(
             PaymentProtocol::from_discriminant(params.protocol).is_some(),
             MaximError::InvalidProtocol
+        );
+        require!(
+            sequence == ctx.accounts.agent_wallet.payment_sequence,
+            MaximError::SequenceMismatch
         );
 
         let now = Clock::get()?.unix_timestamp;
@@ -624,25 +616,16 @@ pub mod maxim_protocol {
         );
 
         let now = Clock::get()?.unix_timestamp;
-        let agent_id_bytes = ctx.accounts.agent_wallet.agent_id.as_bytes().to_vec();
+        let agent_id = ctx.accounts.agent_wallet.agent_id.clone();
         let bump = ctx.accounts.agent_wallet.bump;
 
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            b"agent_wallet",
-            agent_id_bytes.as_slice(),
-            &[bump],
-        ]];
-
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.usdc_token_account.to_account_info(),
-                    to: ctx.accounts.owner_token_account.to_account_info(),
-                    authority: ctx.accounts.agent_wallet.to_account_info(),
-                },
-                signer_seeds,
-            ),
+        cpi_transfer_from_wallet(
+            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.usdc_token_account.to_account_info(),
+            ctx.accounts.owner_token_account.to_account_info(),
+            ctx.accounts.agent_wallet.to_account_info(),
+            &agent_id,
+            bump,
             amount,
         )?;
 
@@ -712,25 +695,16 @@ pub mod maxim_protocol {
         require!(amount > 0, MaximError::ZeroPaymentAmount);
 
         let now = Clock::get()?.unix_timestamp;
-        let agent_id_bytes = ctx.accounts.agent_wallet.agent_id.as_bytes().to_vec();
+        let agent_id = ctx.accounts.agent_wallet.agent_id.clone();
         let bump = ctx.accounts.agent_wallet.bump;
 
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            b"agent_wallet",
-            agent_id_bytes.as_slice(),
-            &[bump],
-        ]];
-
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.usdc_token_account.to_account_info(),
-                    to: ctx.accounts.owner_token_account.to_account_info(),
-                    authority: ctx.accounts.agent_wallet.to_account_info(),
-                },
-                signer_seeds,
-            ),
+        cpi_transfer_from_wallet(
+            ctx.accounts.token_program.to_account_info(),
+            ctx.accounts.usdc_token_account.to_account_info(),
+            ctx.accounts.owner_token_account.to_account_info(),
+            ctx.accounts.agent_wallet.to_account_info(),
+            &agent_id,
+            bump,
             amount,
         )?;
 
@@ -743,6 +717,28 @@ pub mod maxim_protocol {
 
         Ok(())
     }
+}
+
+fn cpi_transfer_from_wallet<'info>(
+    token_program: AccountInfo<'info>,
+    from: AccountInfo<'info>,
+    to: AccountInfo<'info>,
+    authority: AccountInfo<'info>,
+    agent_id: &str,
+    bump: u8,
+    amount: u64,
+) -> Result<()> {
+    let agent_id_bytes = agent_id.as_bytes();
+    let bump_ref = &[bump];
+    let signer_seeds: &[&[&[u8]]] = &[&[b"agent_wallet", agent_id_bytes, bump_ref]];
+    token::transfer(
+        CpiContext::new_with_signer(
+            token_program,
+            Transfer { from, to, authority },
+            signer_seeds,
+        ),
+        amount,
+    )
 }
 
 // ─── Account Contexts ─────────────────────────────────────────────────────────
