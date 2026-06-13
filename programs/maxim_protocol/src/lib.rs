@@ -30,6 +30,7 @@ pub struct PaymentSettled {
     pub protocol: u8,
     pub settled_at: i64,
     pub parent_payment: Option<Pubkey>,
+    pub memo: Option<[u8; 32]>,
 }
 
 /// Emitted when a payment is rejected by on-chain policy enforcement.
@@ -90,6 +91,7 @@ pub struct SpendPolicyUpdated {
     pub agent_wallet: Pubkey,
     pub daily_budget: u64,
     pub weekly_budget: u64,
+    pub monthly_budget: u64,
     pub per_call_limit: u64,
     pub high_value_threshold: u64,
     pub updated_at: i64,
@@ -114,6 +116,8 @@ pub struct SetSpendPolicyParams {
     /// Payments below this threshold rely on gateway enforcement only.
     /// Recommended default: 10_000_000 (10.00 USDC).
     pub high_value_threshold: u64,
+    /// Maximum USDC the agent may spend in any 30-day window (6-decimal). Zero = unlimited.
+    pub monthly_budget: u64,
     /// SHA-256 hashes of permitted destination domain strings.
     /// Empty = all destinations permitted.
     pub allowed_domain_hashes: Vec<[u8; 32]>,
@@ -141,6 +145,10 @@ pub struct SettlePaymentParams {
     /// Links this payment to a parent in a multi-agent orchestration chain.
     /// Set by the gateway when an orchestrating agent's budget funds a sub-agent run.
     pub parent_payment: Option<Pubkey>,
+    /// SHA-256 hash of an arbitrary memo string for off-chain correlation.
+    /// Useful for tying a settlement to a workflow ID, job reference, or order number.
+    /// Never interpreted on-chain. Set to None when no memo is needed.
+    pub memo: Option<[u8; 32]>,
 }
 
 // ─── Program ──────────────────────────────────────────────────────────────────
@@ -163,6 +171,7 @@ pub mod maxim_protocol {
         let config = &mut ctx.accounts.protocol_config;
         config.admin = admin;
         config.version = PROGRAM_VERSION;
+        config.max_single_payment_usdc = 0; // disabled by default
         config.bump = ctx.bumps.protocol_config;
         Ok(())
     }
@@ -178,6 +187,23 @@ pub mod maxim_protocol {
     ) -> Result<()> {
         require!(new_admin != Pubkey::default(), MaximError::InvalidOwner);
         ctx.accounts.protocol_config.admin = new_admin;
+        Ok(())
+    }
+
+    /// Update protocol-level configuration parameters.
+    ///
+    /// Currently governs `max_single_payment_usdc`, the hard cap on any single
+    /// payment settlement across all agent wallets. Setting it to zero disables
+    /// the cap. Only the protocol admin may call this.
+    ///
+    /// This instruction is the primary lever for protocol-wide incident response:
+    /// setting a low cap immediately limits further USDC exposure without requiring
+    /// individual agent freezes.
+    pub fn update_protocol_config(
+        ctx: Context<UpdateProtocolConfig>,
+        max_single_payment_usdc: u64,
+    ) -> Result<()> {
+        ctx.accounts.protocol_config.max_single_payment_usdc = max_single_payment_usdc;
         Ok(())
     }
 
@@ -212,7 +238,10 @@ pub mod maxim_protocol {
         wallet.daily_window_start = now;
         wallet.weekly_spend = 0;
         wallet.weekly_window_start = now;
+        wallet.monthly_spend = 0;
+        wallet.monthly_window_start = now;
         wallet.payment_sequence = 0;
+        wallet.last_payment_at = 0;
         wallet.total_payments = 0;
         wallet.total_volume = 0;
         wallet.is_active = true;
@@ -253,6 +282,7 @@ pub mod maxim_protocol {
         policy.agent_wallet = ctx.accounts.agent_wallet.key();
         policy.daily_budget = params.daily_budget;
         policy.weekly_budget = params.weekly_budget;
+        policy.monthly_budget = params.monthly_budget;
         policy.per_call_limit = params.per_call_limit;
         policy.rate_limit_calls = params.rate_limit_calls;
         policy.rate_limit_window_secs = params.rate_limit_window_secs;
@@ -267,6 +297,7 @@ pub mod maxim_protocol {
             agent_wallet: ctx.accounts.agent_wallet.key(),
             daily_budget: params.daily_budget,
             weekly_budget: params.weekly_budget,
+            monthly_budget: params.monthly_budget,
             per_call_limit: params.per_call_limit,
             high_value_threshold: params.high_value_threshold,
             updated_at: now,
@@ -309,6 +340,18 @@ pub mod maxim_protocol {
 
         let now = Clock::get()?.unix_timestamp;
 
+        // Protocol-level global cap. Checked first so a single admin action can
+        // limit exposure across the entire protocol during an incident.
+        {
+            let config = &ctx.accounts.protocol_config;
+            if config.max_single_payment_usdc > 0 {
+                require!(
+                    params.amount_usdc <= config.max_single_payment_usdc,
+                    MaximError::GlobalPaymentCapExceeded
+                );
+            }
+        }
+
         // Wallet state guards and window resets.
         {
             let wallet = &mut ctx.accounts.agent_wallet;
@@ -316,6 +359,7 @@ pub mod maxim_protocol {
             require!(!wallet.is_frozen, MaximError::AgentFrozen);
             wallet.reset_daily_window_if_elapsed(now);
             wallet.reset_weekly_window_if_elapsed(now);
+            wallet.reset_monthly_window_if_elapsed(now);
         }
 
         // On-chain policy enforcement (high-value threshold).
@@ -342,6 +386,10 @@ pub mod maxim_protocol {
                 require!(
                     policy.within_weekly_budget(wallet.weekly_spend, params.amount_usdc),
                     MaximError::WeeklyBudgetExceeded
+                );
+                require!(
+                    policy.within_monthly_budget(wallet.monthly_spend, params.amount_usdc),
+                    MaximError::MonthlyBudgetExceeded
                 );
                 policy.reset_rate_window_if_elapsed(now);
                 require!(
@@ -406,7 +454,9 @@ pub mod maxim_protocol {
             let wallet = &mut ctx.accounts.agent_wallet;
             wallet.daily_spend = wallet.daily_spend.saturating_add(params.amount_usdc);
             wallet.weekly_spend = wallet.weekly_spend.saturating_add(params.amount_usdc);
+            wallet.monthly_spend = wallet.monthly_spend.saturating_add(params.amount_usdc);
             wallet.total_volume = wallet.total_volume.saturating_add(params.amount_usdc);
+            wallet.last_payment_at = now;
             wallet.payment_sequence = wallet.payment_sequence.saturating_add(1);
             wallet.total_payments = wallet.total_payments.saturating_add(1);
         }
@@ -424,6 +474,7 @@ pub mod maxim_protocol {
         record.settled_at = now;
         record.policy_passed = true;
         record.parent_payment = params.parent_payment;
+        record.memo = params.memo;
         record.bump = ctx.bumps.payment_record;
 
         emit!(PaymentSettled {
@@ -435,6 +486,7 @@ pub mod maxim_protocol {
             protocol: params.protocol,
             settled_at: now,
             parent_payment: params.parent_payment,
+            memo: params.memo,
         });
 
         Ok(())
@@ -483,6 +535,7 @@ pub mod maxim_protocol {
         record.settled_at = now;
         record.policy_passed = false;
         record.parent_payment = None;
+        record.memo = params.memo;
         record.bump = ctx.bumps.payment_record;
 
         emit!(PolicyViolationRecorded {
@@ -776,6 +829,19 @@ pub struct RotateProtocolAdmin<'info> {
 }
 
 #[derive(Accounts)]
+pub struct UpdateProtocolConfig<'info> {
+    #[account(
+        mut,
+        seeds = [b"protocol_config"],
+        bump = protocol_config.bump,
+        has_one = admin @ MaximError::Unauthorized,
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
+
+    pub admin: Signer<'info>,
+}
+
+#[derive(Accounts)]
 #[instruction(agent_id: String)]
 pub struct RegisterAgent<'info> {
     /// The AgentWallet PDA. Derived from [b"agent_wallet", agent_id.as_bytes()].
@@ -895,6 +961,13 @@ pub struct SettlePayment<'info> {
     /// This signature authorises the payment and the on-chain record creation.
     #[account(mut)]
     pub owner: Signer<'info>,
+
+    /// The singleton protocol configuration. Read to enforce the global payment cap.
+    #[account(
+        seeds = [b"protocol_config"],
+        bump = protocol_config.bump,
+    )]
+    pub protocol_config: Account<'info, ProtocolConfig>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,

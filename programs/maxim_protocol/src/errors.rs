@@ -29,6 +29,9 @@ pub enum MaximError {
     #[msg("Weekly budget cap exceeded")]
     WeeklyBudgetExceeded,
 
+    #[msg("Monthly budget cap exceeded")]
+    MonthlyBudgetExceeded,
+
     #[msg("Per-call payment limit exceeded")]
     PerCallLimitExceeded,
 
@@ -64,4 +67,10 @@ pub enum MaximError {
 
     #[msg("USDC token account must be fully drained before closing the agent wallet")]
     TokenAccountNotEmpty,
+
+    #[msg("Sequence number does not match the agent wallet's current payment sequence")]
+    SequenceMismatch,
+
+    #[msg("Payment amount exceeds the protocol-level single payment cap")]
+    GlobalPaymentCapExceeded,
 }

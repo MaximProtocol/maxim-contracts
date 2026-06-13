@@ -3,6 +3,7 @@ use anchor_lang::prelude::*;
 pub const MAX_AGENT_ID_LEN: usize = 64;
 const SECONDS_PER_DAY: i64 = 86_400;
 const SECONDS_PER_WEEK: i64 = 604_800;
+const SECONDS_PER_MONTH: i64 = 2_592_000; // 30-day approximation
 
 /// On-chain registry entry for a single Maxim Protocol agent.
 ///
@@ -52,6 +53,14 @@ pub struct AgentWallet {
     /// Unix timestamp (seconds) marking the start of the current weekly window.
     pub weekly_window_start: i64,
 
+    /// Cumulative USDC spend in the current 30-day accounting window.
+    /// 6-decimal fixed-point. Resets at the start of each new 30-day window.
+    /// Governed by `SpendPolicy.monthly_budget`.
+    pub monthly_spend: u64,
+
+    /// Unix timestamp (seconds) marking the start of the current monthly window.
+    pub monthly_window_start: i64,
+
     /// Monotonically increasing counter. Each settled payment or recorded
     /// violation increments this value and uses the pre-increment value as
     /// part of the `PaymentRecord` PDA seed, ensuring uniqueness.
@@ -64,6 +73,10 @@ pub struct AgentWallet {
     /// Total USDC transferred from this wallet over its lifetime.
     /// 6-decimal fixed-point. Reflects successfully settled payments only.
     pub total_volume: u64,
+
+    /// Unix timestamp of the most recent successful payment settlement.
+    /// Zero until the first payment is settled. Useful for detecting idle agents.
+    pub last_payment_at: i64,
 
     /// When `false`, all `settle_payment` instructions targeting this wallet
     /// are rejected. Funds remain in the ATA and are accessible via direct
@@ -89,25 +102,23 @@ impl AgentWallet {
         + 8                                     // daily_window_start
         + 8                                     // weekly_spend
         + 8                                     // weekly_window_start
+        + 8                                     // monthly_spend
+        + 8                                     // monthly_window_start
         + 8                                     // payment_sequence
         + 8                                     // total_payments
         + 8                                     // total_volume
+        + 8                                     // last_payment_at
         + 1                                     // is_active
         + 1                                     // is_frozen
         + 1;                                    // bump
 
     /// Returns `true` if the wallet can process payments — i.e. it is both
     /// active (owner-controlled) and not frozen (protocol-admin-controlled).
-    /// Use this wherever a single operational check suffices; use the individual
-    /// `is_active` / `is_frozen` fields when the error message must distinguish
-    /// between the two suspension causes.
     pub fn is_operational(&self) -> bool {
         self.is_active && !self.is_frozen
     }
 
     /// Resets the daily spend accumulator if the 24-hour window has elapsed.
-    /// Called at the start of every `settle_payment` to ensure budget checks
-    /// operate on the current window.
     pub fn reset_daily_window_if_elapsed(&mut self, now: i64) {
         if now >= self.daily_window_start + SECONDS_PER_DAY {
             self.daily_spend = 0;
@@ -117,12 +128,20 @@ impl AgentWallet {
     }
 
     /// Resets the weekly spend accumulator if the 7-day window has elapsed.
-    /// Called alongside `reset_daily_window_if_elapsed` in `settle_payment`.
     pub fn reset_weekly_window_if_elapsed(&mut self, now: i64) {
         if now >= self.weekly_window_start + SECONDS_PER_WEEK {
             self.weekly_spend = 0;
             let periods = (now - self.weekly_window_start) / SECONDS_PER_WEEK;
             self.weekly_window_start += periods * SECONDS_PER_WEEK;
+        }
+    }
+
+    /// Resets the monthly spend accumulator if the 30-day window has elapsed.
+    pub fn reset_monthly_window_if_elapsed(&mut self, now: i64) {
+        if now >= self.monthly_window_start + SECONDS_PER_MONTH {
+            self.monthly_spend = 0;
+            let periods = (now - self.monthly_window_start) / SECONDS_PER_MONTH;
+            self.monthly_window_start += periods * SECONDS_PER_MONTH;
         }
     }
 }

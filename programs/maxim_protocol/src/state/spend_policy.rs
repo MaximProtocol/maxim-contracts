@@ -30,9 +30,13 @@ pub struct SpendPolicy {
 
     /// Maximum USDC the agent may spend in any 7-day window.
     /// 6-decimal fixed-point. Zero disables this limit.
-    /// The weekly limit provides a second accumulator that guards against
-    /// sustained overspend across multiple daily resets.
     pub weekly_budget: u64,
+
+    /// Maximum USDC the agent may spend in any 30-day window.
+    /// 6-decimal fixed-point. Zero disables this limit.
+    /// Provides a third accumulator for teams that think in monthly budgets,
+    /// complementing the daily and weekly caps.
+    pub monthly_budget: u64,
 
     /// Maximum USDC per individual payment call.
     /// 6-decimal fixed-point. Zero disables this limit.
@@ -79,6 +83,7 @@ impl SpendPolicy {
         + 32                                                // agent_wallet
         + 8                                                 // daily_budget
         + 8                                                 // weekly_budget
+        + 8                                                 // monthly_budget
         + 8                                                 // per_call_limit
         + 4                                                 // rate_limit_calls
         + 4                                                 // rate_limit_window_secs
@@ -105,6 +110,12 @@ impl SpendPolicy {
     /// weekly budget. Always returns `true` when `weekly_budget` is zero (disabled).
     pub fn within_weekly_budget(&self, current_spend: u64, amount: u64) -> bool {
         self.weekly_budget == 0 || current_spend.saturating_add(amount) <= self.weekly_budget
+    }
+
+    /// Returns `true` if adding `amount` to `current_spend` stays within the
+    /// monthly budget. Always returns `true` when `monthly_budget` is zero (disabled).
+    pub fn within_monthly_budget(&self, current_spend: u64, amount: u64) -> bool {
+        self.monthly_budget == 0 || current_spend.saturating_add(amount) <= self.monthly_budget
     }
 
     /// Returns `true` if the agent has not yet hit the per-window call cap.
